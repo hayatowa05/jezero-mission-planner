@@ -50,6 +50,11 @@ Follow-ups work too: *"use the rover instead"*, *"make it 90 minutes"*, *"safest
 The **Manual planner** tab still has the click-the-map controls. The first start on the real terrain also renders the full-resolution map picture
 (a few seconds; it is then cached in the `data` folder).
 
+**Downloading the coordinates.** Under the key numbers of every route there are three buttons: **CSV** (one row per route point: distance, east/north in
+metres from the lander, elevation, latitude, longitude, position error, difficulty, return margin; opens in Excel), **GeoJSON** (the route line plus waypoints,
+fix stops, start, goal and lander, in [longitude, latitude] order, for QGIS / Google Earth / geojson.io) and **JSON** (the full planner message). Latitude and
+longitude are planetocentric (longitude East), the same convention as the elevation model. The browser saves the file to your Downloads folder.
+
 **How the route was calculated.** Under every route the terminal shows its working (or say *"explain"*): a numbered recipe with this run's own
 numbers (terrain read, cost of a step, the search, the refinement, the independent check, why not a straight line); a chart of where the cost
 comes from along the route (time, energy, risk, localization penalty, fix stops; hover it to inspect any point, which is marked on the map);
@@ -178,3 +183,24 @@ python plan.py --from 18.4446,77.4509 --to 18.4900,77.3470 --profile balanced --
 ## Credits
 Elevation data: USGS Astrogeology Science Center / NASA JPL. Rover track: NASA/JPL-Caltech
 Mars 2020 mission. Both are public domain US government data.
+
+## Sending the route to the HUD (Mars EVA HUD)
+
+The lander terminal and the HUD use the same coordinate frame (metres east / north of the lander at 18.44463 N, 77.45089 E),
+so a planned route goes to the HUD without conversion. Three ways, simplest first:
+
+1. **File.** Plan a route, then press **HUD mission** next to *Download the coordinates*. In the HUD: *Menu → Load mission file*
+   and pick the saved `hud_mission_*.json`.
+2. **Re-download.** The planner serves the latest route at `/mission.json` (open, CORS enabled). In the HUD's *Base link* box enter
+   the planner's address (for example `localhost:8050`) and press *Re-download mission*.
+3. **Live link.** *Connect* in the HUD opens a WebSocket to `/ws`; every new route or replan (dust storm, SEP alert, new hazard)
+   is pushed to the HUD at once.
+
+Options 2 and 3 need the HUD page and the planner to both be http or both https: the HUD on `https://…netlify.app` can only
+link to a planner that is itself on https (hosted, or through a tunnel such as `cloudflared`, see DEPLOY.md). Option 1 always works.
+
+Format (`hud_export.py`): `{"type":"mission","name",…,"waypoints":[{"x","y","name"}],"hazards":[{"x","y","name","r"}]}`.
+The HUD draws a smooth curve through the waypoints, so the exporter picks waypoints such that this curve stays within 3 m of the
+planned route (checked with the HUD's own curve formula). Fix stops and the turn-back point become named waypoints; hazards you
+added on the map become HUD hazards. Not sent: live position and vitals (the HUD accepts `position` and `telemetry` messages,
+but the planner has no real sensors to feed them).

@@ -578,6 +578,7 @@ function renderResults() {
     + stat("Turn-back point", (!chk || P.verdict.startsWith("SHELTER")) ? "n/a" : atGoal(P) ? "at the goal" : `${fmt(P.turn_back_point_enu_m[0])}, ${fmt(P.turn_back_point_enu_m[1])}`,
            !chk ? "no return rule" : P.verdict.startsWith("SHELTER") ? "already heading home" : atGoal(P) ? "tightest margin is on arrival" : "E, N m: tightest return margin")
     + `</div>`;
+  h += `<div class="xrow"><span class="hint">Download the coordinates:</span><button id="dlCsv">CSV</button><button id="dlGeo">GeoJSON</button><button id="dlJson2">JSON</button><button id="dlHud" title="Mission file for the Mars EVA HUD: open the HUD, Menu, Load mission file">HUD mission</button></div>`;
   const cons = P.consumables_at_goal;
   h += `<h3 style="margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim)">${P.return_checked === false ? "Consumables left on arrival (return trip NOT reserved)" : "Consumables left at the goal"}</h3><div class="bars">`;
   for (const k of Object.keys(cons)) { const p = cons[k] * 100, c = p < 25 ? COL.low : p < 50 ? COL.medium : COL.high;
@@ -607,6 +608,13 @@ function renderResults() {
   box.innerHTML = h;
   const dl = $("dlBtn"); if (dl) dl.onclick = () => { const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(P, null, 1)], {type: "application/json"})); a.download = "planner_message.json"; a.click(); };
+  if ($("dlHud")) $("dlHud").onclick = async () => {
+    try { const r = await fetch("/mission.json"); if (!r.ok) throw new Error("no route yet");
+      saveFile(JSON.stringify(await r.json(), null, 1), "json", "application/json", "hud_mission");
+      toast("HUD mission saved. In the HUD: Menu, Load mission file.", "info", 6000); }
+    catch (e) { toast("Could not build the HUD mission: " + e.message, "err", 5000); } };
+  $("dlCsv").onclick = () => saveFile(routeCsv(P), "csv", "text/csv"); $("dlGeo").onclick = () => saveFile(JSON.stringify(routeGeoJSON(P), null, 1), "geojson", "application/geo+json");
+  $("dlJson2").onclick = () => saveFile(JSON.stringify(P, null, 1), "json", "application/json");
   chartSigma($("chartSig"), P); if (chk) chartMargin($("chartMar"), P);
   bindExplain(P);
 }
@@ -803,6 +811,31 @@ function showExplain() {
   S.plan.explain.steps.forEach((s, i) => tlog("sys", `${i + 1}. ${s.title}: ${firstSentence(s.text)}`));
   const el = $("explainBox"); if (el && el.scrollIntoView) el.scrollIntoView({behavior: "smooth", block: "start"});
   if (S.plan.explain.search) toggleReplay();
+}
+
+// ============================================================ export (coordinates)
+function routeCsv(P) {
+  const R = P.route, rows = ["point,distance_m,east_m,north_m,elevation_m,up_from_lander_m,latitude_deg_N,longitude_deg_E,position_error_1sigma_m,leg_difficulty,return_margin_pct"];
+  for (let i = 0; i < R.enu.length; i++)
+    rows.push([i, R.dist_m[i], R.enu[i][0], R.enu[i][1], R.elev_m[i], R.up_m[i], R.lonlat[i][1], R.lonlat[i][0], R.sigma[i], R.difficulty[i], P.return_checked === false ? "" : (R.margin[i] * 100).toFixed(1)].join(","));
+  return rows.join("\n") + "\n";
+}
+function routeGeoJSON(P) {
+  const R = P.route, f = [];
+  const props = {mode: P.mode, profile: P.profile, verdict: P.verdict, distance_km: P.distance_km, eta_min: P.eta_min, note: "coordinates: planetocentric longitude E, latitude N (Mars 2000)"};
+  f.push({type: "Feature", properties: Object.assign({kind: "route"}, props), geometry: {type: "LineString", coordinates: R.lonlat.map((p, i) => [p[0], p[1], R.elev_m[i]])}});
+  P.waypoints_lonlat.forEach((p, i) => f.push({type: "Feature", properties: {kind: "waypoint", index: i, position_error_m: P.predicted_sigma_m[i], east_m: P.waypoints_enu_m[i][0], north_m: P.waypoints_enu_m[i][1]}, geometry: {type: "Point", coordinates: [p[0], p[1], P.waypoints_enu_m[i][2] + (R.elev_m[0] - R.up_m[0])]}}));
+  P.fix_stop_detail.forEach(s => f.push({type: "Feature", properties: {kind: "fix_stop", method: s.method, duration_s: s.duration_s, sigma_before_m: s.sigma_before, sigma_after_m: s.sigma_after}, geometry: {type: "Point", coordinates: s.lonlat}}));
+  f.push({type: "Feature", properties: {kind: "start"}, geometry: {type: "Point", coordinates: R.lonlat[0]}});
+  f.push({type: "Feature", properties: {kind: "goal"}, geometry: {type: "Point", coordinates: R.lonlat[R.lonlat.length - 1]}});
+  f.push({type: "Feature", properties: {kind: "lander"}, geometry: {type: "Point", coordinates: P.lander_lonlat}});
+  return {type: "FeatureCollection", features: f};
+}
+function saveFile(text, ext, mime, prefix) {
+  const d = new Date(), z = n => String(n).padStart(2, "0"), P = S.plan;
+  const name = `${prefix || "jezero_route"}_${P ? P.mode : "plan"}_${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}.${ext}`;
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], {type: mime})); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  toast("Saved " + name + " (check your Downloads folder).", "info", 4000);
 }
 
 // ============================================================ lander terminal (AI layer front end)

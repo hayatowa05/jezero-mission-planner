@@ -1,0 +1,9 @@
+.git
+__pycache__
+node_modules
+output
+data/*.tif
+data/mission_layer_*
+data/jezero_layers_*
+data/app_cache
+*.npz

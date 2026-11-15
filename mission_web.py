@@ -258,6 +258,17 @@ class MissionWeb:
         from localization import LocalizationState
         return LocalizationState.from_dict(req["localization"]) if req.get("localization") else None
 
+    def _set_hud(self, payload, req):
+        """Keep the latest route in the HUD's mission format (served at /mission.json and pushed over /ws)."""
+        try:
+            import hud_export
+            self.hud = hud_export.from_payload(payload, req)
+            self.hud_seq = getattr(self, "hud_seq", 0) + 1
+            for fn in list(getattr(self, "hud_listeners", [])):
+                fn(self.hud)
+        except Exception as e:                     # never let the export break planning
+            print(f"[hud] export failed: {e}")
+
     def _payload(self, p, max_pts=2200):
         """Planner -> HUD message plus the dense per-point arrays the map needs to draw the route."""
         d = p.to_json()
@@ -282,6 +293,17 @@ class MissionWeb:
                                  "dist_m": round(float(p.dist_m[s["idx"]]), 1),
                                  "sigma_before": round(float(p.sigma[s["idx"] - 1]), 1),
                                  "sigma_after": round(float(p.sigma[s["idx"]]), 1)} for s in p.stops]
+        # geographic coordinates for export (planetocentric latitude N, longitude E: the same convention as the DEM)
+        fr = self.mp.frame
+        lon, lat = fr.enu_to_lonlat(p.enu[idx, 0], p.enu[idx, 1])
+        d["route"]["lonlat"] = [[round(float(a), 6), round(float(b), 6)] for a, b in zip(lon, lat)]
+        d["route"]["up_m"] = [round(float(p.enu[i][2]), 1) for i in idx]
+        d["route"]["elev_m"] = [round(float(p.enu[i][2] + fr.elev0), 1) for i in idx]
+        wl_lon, wl_lat = fr.enu_to_lonlat(p.enu[p.waypoint_idx, 0], p.enu[p.waypoint_idx, 1])
+        d["waypoints_lonlat"] = [[round(float(a), 6), round(float(b), 6)] for a, b in zip(wl_lon, wl_lat)]
+        d["fix_stop_detail"] = [dict(s, lonlat=[round(float(x), 6) for x in fr.enu_to_lonlat(s["enu"][0], s["enu"][1])])
+                                for s in d["fix_stop_detail"]]
+        d["lander_lonlat"] = [round(float(fr.lon0), 6), round(float(fr.lat0), 6)]
         d["start_enu"] = [round(float(p.enu[0][0]), 1), round(float(p.enu[0][1]), 1)]
         d["goal_enu"] = [round(float(p.enu[-1][0]), 1), round(float(p.enu[-1][1]), 1)]
         rt = p._verify["retT"][-1] if "_verify" in p.__dict__ else 1e12
@@ -305,7 +327,9 @@ class MissionWeb:
                             req.get("profile", "min_eta"), self._loc(req), refine=bool(req.get("refine", True)),
                             t_elapsed_s=float(req.get("t_elapsed_s", 0.0)), e_used_j=float(req.get("e_used_j", 0.0)),
                             enforce_return=bool(req.get("enforce_return", True)))
-                return self._payload(p)
+                d = self._payload(p)
+                self._set_hud(d, req)
+                return d
             finally:
                 mp._dyn_hazards = []
 
@@ -322,7 +346,9 @@ class MissionWeb:
                                     float(req.get("t_elapsed_s", 0.0)), float(req.get("e_used_j", 0.0)), haz,
                                     enforce_return=bool(req.get("enforce_return", True)))
                 info.pop("replanner", None)
-                return {"plan": self._payload(p), "info": info}
+                d = self._payload(p)
+                self._set_hud(d, req)
+                return {"plan": d, "info": info}
             finally:
                 mp._dyn_hazards = []
 

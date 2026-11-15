@@ -42,6 +42,12 @@ DEM_PATH = [DEM]          # replaced by --synthetic
 
 Image.MAX_IMAGE_PIXELS = None
 
+# ---- online-hosting settings (all optional; defaults keep the local behaviour) ----
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")     # if set, the whole site asks for this password
+APP_USER = os.environ.get("APP_USER", "mission")
+MAX_BODY = int(os.environ.get("MAX_BODY_BYTES", 1_000_000))   # requests are small JSON; refuse anything bigger
+PUBLIC = [False]                                      # True when bound to a non-local address (hides write-to-disk routes)
+
 
 # --------------------------------------------------------------------- terrain
 def terrain(max_slope):
@@ -246,9 +252,95 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "rb") as f:
             self._send(200, f.read(), ctype, cache=True)
 
+    def _hud_mission(self):
+        hud = getattr(MW, "hud", None)
+        body = json.dumps(hud if hud else {"error": "no route planned yet"}).encode()
+        self.send_response(200 if hud else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _hud_ws(self):
+        """Minimal WebSocket server (text frames out only): sends the current mission, then every new one."""
+        import hashlib, queue, select, struct
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or "upgrade" not in self.headers.get("Connection", "").lower():
+            return self._send(400, {"error": "WebSocket upgrade expected"})
+        acc = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        self.protocol_version = "HTTP/1.1"
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", acc)
+        self.end_headers()
+        self.close_connection = True
+
+        def send(obj, op=0x81):
+            data = json.dumps(obj).encode() if op == 0x81 else obj
+            n = len(data)
+            hdr = bytes([op]) + (bytes([n]) if n < 126 else b"\x7e" + struct.pack(">H", n) if n < 65536 else b"\x7f" + struct.pack(">Q", n))
+            self.wfile.write(hdr + data)
+            self.wfile.flush()
+
+        q = queue.Queue()
+        if not hasattr(MW, "hud_listeners"):
+            MW.hud_listeners = []
+        MW.hud_listeners.append(q.put)
+        try:
+            send({"type": "msg", "text": "Linked to the lander terminal"})
+            if getattr(MW, "hud", None):
+                send(MW.hud)
+            sock = self.connection
+            while True:
+                r, _, _ = select.select([sock], [], [], 0.5)
+                if r:
+                    b = sock.recv(4096)
+                    if not b or (b[0] & 0x0F) == 8:          # closed
+                        break
+                    if (b[0] & 0x0F) == 9:                   # ping -> empty pong
+                        send(b"", 0x8A)
+                while not q.empty():
+                    send(q.get())
+        except OSError:
+            pass
+        finally:
+            MW.hud_listeners.remove(q.put) if q.put in MW.hud_listeners else None
+
+    def _authorised(self):
+        """HTTP Basic auth, only when APP_PASSWORD is set. /healthz is always open so the host can probe it."""
+        if not APP_PASSWORD:
+            return True
+        import hmac
+        h = self.headers.get("Authorization", "")
+        if h.startswith("Basic "):
+            try:
+                user, _, pw = base64.b64decode(h[6:]).decode("utf-8", "replace").partition(":")
+                if hmac.compare_digest(user, APP_USER) and hmac.compare_digest(pw, APP_PASSWORD):
+                    return True
+            except Exception:
+                pass
+        body = b"Password required"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Mission planner"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if u.path == "/healthz":
+            return self._send(200, {"ok": True, "ready": MW is not None})
+        if u.path == "/mission.json":             # HUD link: latest route in the HUD's mission format (open + CORS: the HUD is another site)
+            return self._hud_mission()
+        if u.path == "/ws":                       # HUD link: live push of every new route
+            return self._hud_ws()
+        if not self._authorised():
+            return
         try:
             if u.path in ("/", "/index.html"):
                 with open(os.path.join(HERE, "mission_ui.html"), "rb") as f:
@@ -299,8 +391,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if not self._authorised():
+            return
         try:
             n = int(self.headers.get("Content-Length", 0))
+            if n < 0 or n > MAX_BODY:
+                return self._send(413, {"error": "request too large"})
+            if PUBLIC[0] and u.path in ("/export", "/plan"):      # classic routes write files / are not part of the terminal
+                return self._send(404, {"error": "not found"})
             req = json.loads(self.rfile.read(n) or b"{}")
             with LOCK:
                 if u.path == "/plan":
@@ -329,7 +427,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     global MW
     ap = argparse.ArgumentParser(description="Jezero mission planner: map UI for the spec-compliant planner")
-    ap.add_argument("--port", type=int, default=8050)
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8050)))
+    ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
+                    help="address to listen on; use 0.0.0.0 to accept connections from other machines (online hosting)")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--synthetic", action="store_true",
                     help="use a built-in synthetic Jezero-like terrain (no 90 MB DEM download needed)")
@@ -355,9 +455,14 @@ def main():
     if args.classic:
         for name in ("relief", "slope", "rough", "hazard", "risk", "nogo"):
             layer_path(name, 25.0)
+    PUBLIC[0] = args.host not in ("127.0.0.1", "localhost", "::1")
+    if PUBLIC[0]:
+        args.no_browser = True
+        if not APP_PASSWORD:
+            print("[app] WARNING: listening publicly with no APP_PASSWORD set - anyone with the link can use it.")
     url = f"http://localhost:{args.port}"
     try:
-        srv = Server(("127.0.0.1", args.port), Handler)
+        srv = Server((args.host, args.port), Handler)
     except OSError:
         sys.exit(f"\nPort {args.port} is already in use. The planner is probably still running in another window "
                  f"(an older run).\nClose that window (press Ctrl+C in it), or start this one on another port, e.g. "
