@@ -136,6 +136,7 @@ The spec is a whole system. These parts are separate subsystems, not planner log
 canvas, against the live server): boot, 7 scenario presets, click-to-plan, pan/zoom, overlays, hazards + D* replan, dust, SEP,
 error display, with no JavaScript errors, and the canvas output was inspected. **Not verified: CSS layout in a real browser.** If a
 panel looks off on your screen, tell me which browser and I will fix it.
+The route can be downloaded as CSV, GeoJSON or JSON (latitude / longitude are derived from the Site ENU frame; round-trip error under 0.1 m in tests).
 Map pictures (terrain, no-go masks, slope) are rendered at the DEM's **full 20 m resolution** (an earlier version shrank a real-size map to 60 m per
 pixel, which looked blocky). They are rendered in strips so memory stays modest (about 1.4 GB peak at 20 million cells, most of it the terrain data
 itself), and the base map is cached in the `data` folder as `mission_layer_*.jpg`, so only the first start renders it. The search replay is drawn as a
